@@ -1562,6 +1562,87 @@ class ManifestDagChecker:
         return issues
 
 
+class CommandFrontmatterChecker:
+    """Strict-parses YAML frontmatter on every .md file under commands/.
+
+    The lenient simple_yaml_parse fallback would mask real bugs (e.g. unquoted
+    inner double quotes, leading '[', unquoted ': ') that strict parsers in
+    downstream tools (oh-my-pi, GitHub renderer) reject. Always uses PyYAML
+    here regardless of HAS_PYYAML; emits one warning if PyYAML is missing.
+    """
+
+    name = "command-frontmatter"
+
+    def check(self, base_path: Path) -> list[ValidationIssue]:
+        issues: list[ValidationIssue] = []
+        commands_dir = base_path / COMMANDS_DIR_WORKFLOW
+
+        if not commands_dir.exists():
+            return issues
+
+        if not HAS_PYYAML:
+            issues.append(
+                ValidationIssue(
+                    skill="__command-frontmatter__",
+                    check=self.name,
+                    severity=Severity.WARNING,
+                    message="PyYAML not installed; skipping strict frontmatter parse of command files",
+                )
+            )
+            return issues
+
+        for md_file in sorted(commands_dir.rglob("*.md")):
+            if "references" in md_file.parts:
+                continue
+
+            rel_path = str(md_file.relative_to(base_path))
+            try:
+                content = md_file.read_text()
+            except OSError as e:
+                issues.append(
+                    ValidationIssue(
+                        skill=rel_path,
+                        check=self.name,
+                        severity=Severity.ERROR,
+                        message=f"Could not read file: {e}",
+                        file=rel_path,
+                    )
+                )
+                continue
+
+            if not content.startswith("---"):
+                continue  # No frontmatter; slash commands without it are valid
+
+            parts = content.split("---", 2)
+            if len(parts) < 3:
+                issues.append(
+                    ValidationIssue(
+                        skill=rel_path,
+                        check=self.name,
+                        severity=Severity.ERROR,
+                        message="Frontmatter opened with --- but never closed",
+                        file=rel_path,
+                    )
+                )
+                continue
+
+            try:
+                yaml.safe_load(parts[1])
+            except yaml.YAMLError as e:
+                first_line = str(e).split("\n")[0]
+                issues.append(
+                    ValidationIssue(
+                        skill=rel_path,
+                        check=self.name,
+                        severity=Severity.ERROR,
+                        message=f"YAML frontmatter parse error: {first_line}",
+                        file=rel_path,
+                    )
+                )
+
+        return issues
+
+
 class WorkflowOrphanChecker:
     """Detects command .md files not referenced by any YAML definition."""
 
@@ -1787,6 +1868,7 @@ class WorkflowValidator:
         self.checkers = [
             WorkflowDefinitionChecker(),
             ManifestDagChecker(),
+            CommandFrontmatterChecker(),
             WorkflowOrphanChecker(),
         ]
 
